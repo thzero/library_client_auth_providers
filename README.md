@@ -14,7 +14,7 @@ The auth server checks each proof; [@thzero/library_server_auth_providers](https
 | Service | What it does |
 | --- | --- |
 | `service/index.js` (`AuthProvidersService`) | Starts a sign-in or a link, reads what a provider sent back (`takeReturn`), posts the proof to the auth server, and keeps the sign-in it answers with. |
-| `service/auth.js` (`ServerTokenAuthService`) | The session: the auth server's token, in the store (the REST services send it from there) and in `localStorage` until it expires. Inject it as the app's auth service. |
+| `service/auth.js` (`ServerTokenAuthService`) | The session: the auth server's token, in the store (the REST services send it from there) and in `localStorage`, renewed with the auth server's renewal key so the player stays signed in. Inject it as the app's auth service. |
 
 ## Requirements
 
@@ -55,7 +55,7 @@ _initialize() {
 
 	// Google: the Firebase library's popup, as a one-time proof.
 	this._injectService(AuthProvidersConstants.InjectorKeys.SERVICE_AUTH_FIREBASE_PROOF, new FirebaseProofService());
-	this._injectService(Constants.InjectorKeys.SERVICE_AUTH_PROVIDERS, new AppAuthProvidersService());
+	this._injectService(AuthProvidersConstants.InjectorKeys.SERVICE_AUTH_PROVIDERS, new AppAuthProvidersService());
 }
 
 _initializeAuth() {
@@ -71,6 +71,10 @@ Then:
 - **Return pages** (one each for Steam and Discord): `takeReturn(provider, route.query)` answers `{ intent, proof, cancelled }`. For `intent === 'signIn'`, call `signInWith(correlationId, proof)`; for `'link'`, call `link(correlationId, proof)`.
 - **Account page:** `account()`, `startLink(correlationId, id)`, `unlink(correlationId, type, id)`, and `confirmLink(correlationId, ticket)` when `link` answers `{ status: 'conflict', ticket }`.
 - Call the auth service's `initialize(correlationId)` once the store exists, to pick up a sign-in from an earlier visit.
+
+### Staying signed in
+
+When the auth server answers a sign-in with a renewal key (`renewal`, [@thzero/library_server_auth_providers](https://github.com/thzero/library_server_auth_providers)' `RenewalsService`), `ServerTokenAuthService` keeps it beside the token and renews five minutes before the token expires, or on a later visit after it has (`users/renew`). It finds `AuthProvidersService` under `SERVICE_AUTH_PROVIDERS` for that. Each key works once, so open tabs share the newest through `localStorage`: one tab's renewal, sign-in or sign-out reaches the others. When the server can't be reached the sign-in lasts while the token does, and the renewal is tried again every minute. Signing out deletes the key on the server (`users/signOut`). Without a key the sign-in lasts until the token expires.
 
 ## Configuration
 

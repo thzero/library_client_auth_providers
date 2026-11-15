@@ -159,7 +159,29 @@ describe('The auth server', () => {
 		expect(posted[0].body).toEqual({ code: 'code' });
 		expect(posted[0].headers[LibraryClientConstants.Headers.AuthKeys.API]).toBe('api');
 		expect(posted[0].headers.Authorization).toBeUndefined();
-		expect(serviceAuth.signedIn).toHaveBeenCalledWith('c', 't', { id: 'u' });
+		expect(serviceAuth.signedIn).toHaveBeenCalledWith('c', 't', { id: 'u' }, null);
+	});
+
+	it('keeps the renewal key the sign-in came with', async () => {
+		answer.body.results.renewal = 'key';
+		await service.signInWith('c', { type: 'discord', code: 'code' });
+		expect(serviceAuth.signedIn).toHaveBeenCalledWith('c', 't', { id: 'u' }, 'key');
+	});
+
+	it('renews and revokes a key, without the session token', async () => {
+		expect((await service.renew('c', 'key')).results.token).toBe('t');
+		await service.revoke('c', 'key');
+		expect(posted.map(post => post.url)).toEqual([ 'https://auth.example.com/api/v1/users/renew', 'https://auth.example.com/api/v1/users/signOut' ]);
+		expect(posted.map(post => post.body)).toEqual([ { renewal: 'key' }, { renewal: 'key' } ]);
+		expect(posted[0].headers.Authorization).toBeUndefined();
+	});
+
+	it('marks a renewal that could not reach the server', async () => {
+		globalThis.fetch = vi.fn(async () => { throw new Error('offline'); });
+		expect((await service.renew('c', 'key')).unreachable).toBe(true);
+		answer = { status: 401, body: { success: false, message: 'no' } };
+		globalThis.fetch = vi.fn(async () => ({ ok: false, status: 401, json: async () => answer.body }));
+		expect((await service.renew('c', 'key')).unreachable).toBeUndefined();
 	});
 
 	it('refuses a missing proof without asking the server', async () => {
