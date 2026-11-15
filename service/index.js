@@ -36,10 +36,15 @@ class AuthProvidersService extends Service {
 		this._serviceFirebaseProof = this._injector.getService(Constants.InjectorKeys.SERVICE_AUTH_FIREBASE_PROOF);
 	}
 
+	// The sign-in choices. A page that shows them is about to be clicked, so Google's Firebase starts
+	// loading here (FirebaseProofService.preload): its popup has to open right after the click.
 	providers() {
 		const external = this._external();
+		const google = !!(this._serviceFirebaseProof && external.firebase?.apiKey);
+		if (google)
+			this._serviceFirebaseProof.preload?.();
 		return [
-			{ id: 'google', type: 'firebase', available: !!(this._serviceFirebaseProof && external.firebase?.apiKey) },
+			{ id: 'google', type: 'firebase', available: google },
 			{ id: 'steam', type: 'steam', available: !!external.steam?.returnUrl },
 			{ id: 'discord', type: 'discord', available: !!(external.discord?.clientId && external.discord?.returnUrl) }
 		];
