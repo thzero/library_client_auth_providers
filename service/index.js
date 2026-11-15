@@ -2,6 +2,8 @@ import LibraryClientConstants from '@thzero/library_client/constants';
 
 import Service from '@thzero/library_client/service/index';
 
+import Constants from '../constants';
+
 const DISCORD_AUTHORIZE = 'https://discord.com/oauth2/authorize';
 const OPENID_NS = 'http://specs.openid.net/auth/2.0';
 const OPENID_SELECT = 'http://specs.openid.net/auth/2.0/identifier_select';
@@ -10,10 +12,12 @@ const STEAM_LOGIN = 'https://steamcommunity.com/openid/login';
 const MISMATCH = 'The sign-in answer is missing, or isn\'t the one this browser asked for.';
 
 // Sign-in through outside providers, proved to the app's own auth server, which answers with its
-// own token: Google through Firebase Auth (a popup), Steam through OpenID 2.0 and Discord through
+// own token: Google through Firebase Auth (a popup, by @thzero/library_client_firebase's
+// FirebaseProofService, injected as SERVICE_AUTH_FIREBASE_PROOF), Steam through OpenID 2.0 and Discord through
 // OAuth2 (each a trip to the provider's page and back to a return page in the app). The auth
 // server checks each proof; @thzero/library_server_auth_providers has the checks.
-// A provider is offered once its config under "external" (firebase, steam, discord) is filled in.
+// A provider is offered once its config under "external" (firebase, steam, discord) is filled in,
+// and for Google, once FirebaseProofService is injected.
 // The same proofs link another sign-in to the signed-in account, and when that sign-in already has
 // its own account, merge the two once the player confirms.
 // The session itself (the auth server's token) is ServerTokenAuthService (service/auth.js),
@@ -23,13 +27,19 @@ class AuthProvidersService extends Service {
 	constructor() {
 		super();
 
-		this._firebaseAuth = null;
+		this._serviceFirebaseProof = null;
+	}
+
+	async init(injector) {
+		await super.init(injector);
+
+		this._serviceFirebaseProof = this._injector.getService(Constants.InjectorKeys.SERVICE_AUTH_FIREBASE_PROOF);
 	}
 
 	providers() {
 		const external = this._external();
 		return [
-			{ id: 'google', type: 'firebase', available: !!external.firebase?.apiKey },
+			{ id: 'google', type: 'firebase', available: !!(this._serviceFirebaseProof && external.firebase?.apiKey) },
 			{ id: 'steam', type: 'steam', available: !!external.steam?.returnUrl },
 			{ id: 'discord', type: 'discord', available: !!(external.discord?.clientId && external.discord?.returnUrl) }
 		];
@@ -142,37 +152,12 @@ class AuthProvidersService extends Service {
 		return this._config.getExternal() ?? {};
 	}
 
-	async _firebase(config) {
-		if (!this._firebaseAuth) {
-			const { initializeApp } = await import('firebase/app');
-			const { getAuth } = await import('firebase/auth');
-			this._firebaseAuth = getAuth(initializeApp(config));
-		}
-		return this._firebaseAuth;
-	}
-
-	// Signs in with Google in a Firebase Auth popup and answers the Firebase ID token, signing out
-	// of Firebase again: the auth server's token is the session, Firebase only proves who the
-	// player is. Firebase loads only when the player picks Google. Closing the popup answers an
-	// error with no message.
+	// The Firebase ID token from a Google popup (FirebaseProofService). Closing the popup answers
+	// an error with no message.
 	async _googleProof(correlationId) {
-		const firebase = this._external().firebase;
-		if (!firebase?.apiKey)
-			return this._error('AuthProvidersService', '_googleProof', 'No external.firebase in the config.', null, null, null, correlationId);
-
-		try {
-			const { GoogleAuthProvider, signInWithPopup, signOut } = await import('firebase/auth');
-			const auth = await this._firebase(firebase);
-			const result = await signInWithPopup(auth, new GoogleAuthProvider());
-			const idToken = await result.user.getIdToken();
-			await signOut(auth);
-			return this._successResponse(idToken, correlationId);
-		}
-		catch (err) {
-			if ((err?.code === 'auth/popup-closed-by-user') || (err?.code === 'auth/cancelled-popup-request'))
-				return this._error('AuthProvidersService', '_googleProof', '', null, null, null, correlationId);
-			return this._error('AuthProvidersService', '_googleProof', `Google sign-in didn't go through${err?.code ? ` (${err.code})` : ''}.`, err, null, null, correlationId);
-		}
+		if (!this._serviceFirebaseProof)
+			return this._error('AuthProvidersService', '_googleProof', 'Google sign-in needs @thzero/library_client_firebase\'s FirebaseProofService.', null, null, null, correlationId);
+		return await this._serviceFirebaseProof.idToken(correlationId);
 	}
 
 	async _link(correlationId, proof) {

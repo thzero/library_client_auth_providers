@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import LibraryClientConstants from '@thzero/library_client/constants';
 
+import Constants from '../constants';
 import AuthProvidersService from '../service/index';
 import { installBrowser, removeBrowser } from './browser';
 
@@ -14,6 +15,7 @@ const external = {
 let service;
 let assigned;
 let serviceAuth;
+let serviceFirebaseProof;
 let posted;
 let answer;
 
@@ -33,7 +35,14 @@ beforeEach(() => {
 		getExternal: () => external,
 		getBackend: (correlationId, key) => (key === 'auth' ? { baseUrl: 'https://auth.example.com/api/v1', apiKey: 'api' } : null)
 	};
-	service._injector = { getService: (key) => (key === LibraryClientConstants.InjectorKeys.SERVICE_AUTH ? serviceAuth : null) };
+	// Stands in for @thzero/library_client_firebase's FirebaseProofService.
+	serviceFirebaseProof = { idToken: vi.fn(async (correlationId) => ({ success: true, results: 'firebase-token', correlationId })) };
+	const services = {
+		[LibraryClientConstants.InjectorKeys.SERVICE_AUTH]: serviceAuth,
+		[Constants.InjectorKeys.SERVICE_AUTH_FIREBASE_PROOF]: serviceFirebaseProof
+	};
+	service._injector = { getService: (key) => services[key] ?? null };
+	service._serviceFirebaseProof = serviceFirebaseProof;
 });
 
 afterEach(() => {
@@ -46,6 +55,35 @@ describe('AuthProvidersService.providers', () => {
 		expect(service.providers().map((provider) => provider.available)).toEqual([ true, true, true ]);
 		service._config.getExternal = () => ({ steam: { returnUrl: '' }, discord: { clientId: 'id' } });
 		expect(service.providers().map((provider) => provider.available)).toEqual([ false, false, false ]);
+	});
+});
+
+describe('Google', () => {
+	it('is offered only when the Firebase proof service is injected', () => {
+		service._serviceFirebaseProof = null;
+		expect(service.providers()[0].available).toBe(false);
+	});
+
+	it('signs in with the Firebase ID token the Firebase library answers', async () => {
+		const response = await service.start('c', 'google');
+		expect(response.success).toBe(true);
+		expect(serviceFirebaseProof.idToken).toHaveBeenCalledWith('c');
+		expect(posted[0].url).toBe('https://auth.example.com/api/v1/users/firebase/verify');
+		expect(posted[0].body).toEqual({ idToken: 'firebase-token' });
+		expect(serviceAuth.signedIn).toHaveBeenCalled();
+	});
+
+	it('links Google with the session token', async () => {
+		answer.body = { success: true, results: { status: 'linked' } };
+		await service.startLink('c', 'google');
+		expect(posted[0].url).toBe('https://auth.example.com/api/v1/users/link');
+		expect(posted[0].body).toEqual({ type: 'firebase', idToken: 'firebase-token' });
+	});
+
+	it('stops when the player closes the popup', async () => {
+		serviceFirebaseProof.idToken = vi.fn(async () => ({ success: false, message: '' }));
+		expect((await service.start('c', 'google')).success).toBe(false);
+		expect(posted).toHaveLength(0);
 	});
 });
 

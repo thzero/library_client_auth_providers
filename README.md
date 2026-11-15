@@ -5,7 +5,7 @@
 
 Browser sign-in through outside providers for [@thzero/library_client](https://github.com/thzero/library_client) apps, proved to the app's own auth server, which answers with its own token.
 
-- **Google**, through Firebase Auth: a popup.
+- **Google**, through Firebase Auth: a popup, by [@thzero/library_client_firebase](https://github.com/thzero/library_client_firebase)'s `FirebaseProofService`.
 - **Steam**, through OpenID 2.0: a trip to Steam's sign-in page and back to a return page in the app.
 - **Discord**, through OAuth2: a trip to Discord's authorize page and back, with a `state` the return page checks.
 
@@ -22,7 +22,7 @@ The auth server checks each proof; [@thzero/library_server_auth_providers](https
 
 [![NPM](https://nodei.co/npm/@thzero/library_client_auth_providers.png?compact=true)](https://npmjs.org/package/@thzero/library_client_auth_providers)
 
-`firebase` is an optional peer: install it only when the app offers Google.
+`@thzero/library_client_firebase` is an optional peer: install it only when the app offers Google.
 
 ## Usage
 
@@ -46,10 +46,24 @@ class AppAuthService extends ServerTokenAuthService {
 ```
 
 ```js
+import FirebaseProofService from '@thzero/library_client_firebase/service/proof';
+
+import AuthProvidersConstants from '@thzero/library_client_auth_providers/constants';
+
+_initialize() {
+	super._initialize();
+
+	// Google: the Firebase library's popup, as a one-time proof.
+	this._injectService(AuthProvidersConstants.InjectorKeys.SERVICE_AUTH_FIREBASE_PROOF, new FirebaseProofService());
+	this._injectService(Constants.InjectorKeys.SERVICE_AUTH_PROVIDERS, new AppAuthProvidersService());
+}
+
 _initializeAuth() {
 	return new AppAuthService();
 }
 ```
+
+Google is offered once `FirebaseProofService` is injected and `external.firebase` is filled in.
 
 Then:
 
