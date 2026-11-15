@@ -149,6 +149,19 @@ class AuthProvidersService extends Service {
 	}
 
 	// The backend config entry for the auth server.
+	// Trades a renewal key for a new sign-in: { token, user, renewal, renewalExpiresAt }. The
+	// answer is marked unreachable when the auth server couldn't be reached (ServerTokenAuthService
+	// tries again then).
+	async renew(correlationId, renewal) {
+		return await this._post(correlationId, 'renew', this._paths().renew, { renewal });
+	}
+
+	// Deletes a renewal key on the auth server, on sign-out. Best effort: signing out of the browser
+	// doesn't wait on it.
+	async revoke(correlationId, renewal) {
+		return await this._post(correlationId, 'revoke', this._paths().signOut, { renewal });
+	}
+
 	_backendKey() {
 		return 'auth';
 	}
@@ -177,6 +190,8 @@ class AuthProvidersService extends Service {
 			firebase: 'users/firebase/verify',
 			link: 'users/link',
 			linkConfirm: 'users/link/confirm',
+			renew: 'users/renew',
+			signOut: 'users/signOut',
 			steam: 'users/steam/verify',
 			unlink: 'users/unlink'
 		};
@@ -212,7 +227,9 @@ class AuthProvidersService extends Service {
 			});
 		}
 		catch (err) {
-			return this._error('AuthProvidersService', method, `Couldn't reach the sign-in server at ${config.baseUrl}.`, err, null, null, correlationId);
+			const unreachable = this._error('AuthProvidersService', method, `Couldn't reach the sign-in server at ${config.baseUrl}.`, err, null, null, correlationId);
+			unreachable.unreachable = true;
+			return unreachable;
 		}
 
 		const answer = await response.json().catch(() => null);
@@ -242,7 +259,7 @@ class AuthProvidersService extends Service {
 			return this._error('AuthProvidersService', method, 'The sign-in server answered without a sign-in.', null, null, null, correlationId);
 
 		const serviceAuth = this._injector.getService(LibraryClientConstants.InjectorKeys.SERVICE_AUTH);
-		await serviceAuth.signedIn(correlationId, response.results.token, response.results.user);
+		await serviceAuth.signedIn(correlationId, response.results.token, response.results.user, response.results.renewal ?? null);
 		return this._success(correlationId);
 	}
 

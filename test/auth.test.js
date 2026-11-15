@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import LibraryClientUtility from '@thzero/library_client/utility/index';
 
+import Constants from '../constants';
 import ServerTokenAuthService from '../service/auth';
 import { installBrowser, removeBrowser, token } from './browser';
 
@@ -14,7 +15,7 @@ beforeEach(() => {
 	LibraryClientUtility.$navRouter = { push: vi.fn() };
 	user = {
 		token: null,
-		resetUser: vi.fn(),
+		resetUser: vi.fn(async () => { user.token = null; }),
 		setAuthCompleted: vi.fn(),
 		setLoggedIn: vi.fn(),
 		setTokenResult: vi.fn(async (correlationId, result) => { user.token = result.token; }),
@@ -27,6 +28,8 @@ beforeEach(() => {
 });
 
 afterEach(() => {
+	service._unschedule();
+	vi.useRealTimers();
 	removeBrowser();
 });
 
@@ -79,5 +82,128 @@ describe('ServerTokenAuthService', () => {
 		expect(localStorage.getItem('my-app.auth')).not.toBeNull();
 		await service.signIn('c');
 		expect(LibraryClientUtility.$navRouter.push).toHaveBeenCalledWith('/sign-in');
+	});
+});
+
+describe('ServerTokenAuthService renewal', () => {
+	let providers;
+	let renewed;
+
+	const saved = () => JSON.parse(localStorage.getItem('thzero.auth') ?? 'null');
+
+	beforeEach(() => {
+		renewed = token({ userId: 'u', exp: now() + 3600 });
+		providers = {
+			renew: vi.fn(async () => ({ success: true, results: { token: renewed, user: { id: 'u' }, renewal: 'key2' } })),
+			revoke: vi.fn(async () => ({ success: true }))
+		};
+		service._injector = { getService: (key) => (key === Constants.InjectorKeys.SERVICE_AUTH_PROVIDERS ? providers : null) };
+	});
+
+	it('renews an expired sign-in on the next visit', async () => {
+		localStorage.setItem('thzero.auth', JSON.stringify({ token: token({ exp: now() - 10 }), user: { id: 'u' }, renewal: 'key1' }));
+		await service.initialize('c');
+		expect(providers.renew).toHaveBeenCalledWith('c', 'key1');
+		expect(user.token).toBe(renewed);
+		expect(saved().renewal).toBe('key2');
+	});
+
+	it('forgets an expired sign-in whose key is refused', async () => {
+		providers.renew = vi.fn(async () => ({ success: false }));
+		localStorage.setItem('thzero.auth', JSON.stringify({ token: token({ exp: now() - 10 }), user: { id: 'u' }, renewal: 'key1' }));
+		await service.initialize('c');
+		expect(user.token).toBeNull();
+		expect(saved()).toBeNull();
+		expect(user.setAuthCompleted).toHaveBeenCalledWith('c', true);
+	});
+
+	it('renews five minutes before the token expires', async () => {
+		vi.useFakeTimers();
+		await service.signedIn('c', token({ userId: 'u', exp: now() + 3600 }), { id: 'u' }, 'key1');
+		await vi.advanceTimersByTimeAsync((55 * 60 * 1000) - 1000);
+		expect(providers.renew).not.toHaveBeenCalled();
+		await vi.advanceTimersByTimeAsync(2000);
+		expect(providers.renew).toHaveBeenCalledWith(expect.anything(), 'key1');
+		expect(user.token).toBe(renewed);
+		expect(saved().renewal).toBe('key2');
+	});
+
+	it('does not schedule a renewal without a key', async () => {
+		vi.useFakeTimers();
+		await service.signedIn('c', token({ userId: 'u', exp: now() + 3600 }), { id: 'u' });
+		await vi.advanceTimersByTimeAsync(60 * 60 * 1000);
+		expect(providers.renew).not.toHaveBeenCalled();
+	});
+
+	it('keeps the sign-in and tries again when the server is out of reach', async () => {
+		vi.useFakeTimers();
+		providers.renew = vi.fn(async () => ({ success: false, unreachable: true }));
+		const current = token({ userId: 'u', exp: now() + 120 });
+		await service.signedIn('c', current, { id: 'u' }, 'key1');
+		await vi.advanceTimersByTimeAsync(1);
+		expect(providers.renew).toHaveBeenCalledTimes(1);
+		expect(user.token).toBe(current);
+		await vi.advanceTimersByTimeAsync(60 * 1000);
+		expect(providers.renew).toHaveBeenCalledTimes(2);
+	});
+
+	it('takes the sign-in another tab already renewed, without renewing again', async () => {
+		await service.signedIn('c', token({ userId: 'u', exp: now() + 60 }), { id: 'u' }, 'key1');
+		localStorage.setItem('thzero.auth', JSON.stringify({ token: renewed, user: { id: 'u' }, renewal: 'key2' }));
+		expect(await service._renew('c')).toBe(true);
+		expect(providers.renew).not.toHaveBeenCalled();
+		expect(user.token).toBe(renewed);
+	});
+
+	it('takes the sign-in from the other tab when it used the key first', async () => {
+		await service.signedIn('c', token({ userId: 'u', exp: now() + 60 }), { id: 'u' }, 'key1');
+		providers.renew = vi.fn(async () => {
+			localStorage.setItem('thzero.auth', JSON.stringify({ token: renewed, user: { id: 'u' }, renewal: 'key9' }));
+			return { success: false };
+		});
+		expect(await service._renew('c')).toBe(true);
+		expect(user.token).toBe(renewed);
+	});
+
+	it('renews once when asked twice at the same time', async () => {
+		localStorage.setItem('thzero.auth', JSON.stringify({ token: token({ exp: now() - 10 }), user: { id: 'u' }, renewal: 'key1' }));
+		await Promise.all([ service._renew('c'), service._renew('c') ]);
+		expect(providers.renew).toHaveBeenCalledTimes(1);
+	});
+
+	it('renews an expired token when asked to refresh, and signs out when it cannot', async () => {
+		localStorage.setItem('thzero.auth', JSON.stringify({ token: token({ exp: now() - 10 }), user: { id: 'u' }, renewal: 'key1' }));
+		user.token = token({ exp: now() - 10 });
+		await service.refreshToken('c');
+		expect(user.token).toBe(renewed);
+
+		providers.renew = vi.fn(async () => ({ success: false }));
+		user.token = token({ exp: now() - 10 });
+		localStorage.setItem('thzero.auth', JSON.stringify({ token: user.token, user: { id: 'u' }, renewal: 'key2' }));
+		await service.refreshToken('c');
+		expect(user.resetUser).toHaveBeenCalled();
+	});
+
+	it('deletes the key on sign-out, and an older key on a new sign-in', async () => {
+		await service.signedIn('c', token({ exp: now() + 3600 }), { id: 'u' }, 'key1');
+		await service.signedIn('c', token({ exp: now() + 3600 }), { id: 'u' }, 'key2');
+		expect(providers.revoke).toHaveBeenCalledWith('c', 'key1');
+		await service.signOut('c');
+		expect(providers.revoke).toHaveBeenCalledWith('c', 'key2');
+		expect(saved()).toBeNull();
+	});
+
+	it('follows a sign-in and a sign-out in another tab', async () => {
+		const listeners = [];
+		globalThis.window.addEventListener = (type, listener) => listeners.push(listener);
+		await service.initialize('c');
+
+		localStorage.setItem('thzero.auth', JSON.stringify({ token: renewed, user: { id: 'u' }, renewal: 'key2' }));
+		await listeners[0]({ key: 'thzero.auth' });
+		expect(user.token).toBe(renewed);
+
+		localStorage.removeItem('thzero.auth');
+		await listeners[0]({ key: 'thzero.auth' });
+		expect(user.token).toBeNull();
 	});
 });
