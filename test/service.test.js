@@ -36,7 +36,7 @@ beforeEach(() => {
 		getBackend: (correlationId, key) => (key === 'auth' ? { baseUrl: 'https://auth.example.com/api/v1', apiKey: 'api' } : null)
 	};
 	// Stands in for @thzero/library_client_firebase's FirebaseProofService.
-	serviceFirebaseProof = { idToken: vi.fn(async (correlationId) => ({ success: true, results: 'firebase-token', correlationId })) };
+	serviceFirebaseProof = { idToken: vi.fn(async (correlationId) => ({ success: true, results: 'firebase-token', correlationId })), preload: vi.fn() };
 	const services = {
 		[LibraryClientConstants.InjectorKeys.SERVICE_AUTH]: serviceAuth,
 		[Constants.InjectorKeys.SERVICE_AUTH_FIREBASE_PROOF]: serviceFirebaseProof
@@ -59,6 +59,20 @@ describe('AuthProvidersService.providers', () => {
 });
 
 describe('Google', () => {
+	it('starts loading Firebase when the choices are listed, only when Google is offered', () => {
+		service.providers();
+		expect(serviceFirebaseProof.preload).toHaveBeenCalledTimes(1);
+
+		service._config.getExternal = () => ({});
+		service.providers();
+		expect(serviceFirebaseProof.preload).toHaveBeenCalledTimes(1);
+	});
+
+	it('works with a Firebase proof service that has no preload', () => {
+		delete serviceFirebaseProof.preload;
+		expect(service.providers()[0].available).toBe(true);
+	});
+
 	it('is offered only when the Firebase proof service is injected', () => {
 		service._serviceFirebaseProof = null;
 		expect(service.providers()[0].available).toBe(false);
