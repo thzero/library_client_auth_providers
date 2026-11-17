@@ -98,6 +98,7 @@ describe('ServerTokenAuthService renewal', () => {
 			revoke: vi.fn(async () => ({ success: true }))
 		};
 		service._injector = { getService: (key) => (key === Constants.InjectorKeys.SERVICE_AUTH_PROVIDERS ? providers : null) };
+		service._raceWaitMs = 0;
 	});
 
 	it('renews an expired sign-in on the next visit', async () => {
@@ -218,6 +219,35 @@ describe('ServerTokenAuthService renewal', () => {
 		});
 		expect(await service._renew('c')).toBe(true);
 		expect(user.token).toBe(renewed);
+	});
+
+	it('waits for the tab that used the key first to save the new sign-in', async () => {
+		service._raceWaitMs = 2000;
+		await service.signedIn('c', token({ userId: 'u', exp: now() - 10 }), { id: 'u' }, 'key1');
+		providers.renew = vi.fn(async () => {
+			setTimeout(() => localStorage.setItem('thzero.auth', JSON.stringify({ token: renewed, user: { id: 'u' }, renewal: 'key9' })), 400);
+			return { success: false };
+		});
+		expect(await service._renew('c')).toBe(true);
+		expect(user.token).toBe(renewed);
+		expect(saved().renewal).toBe('key9');
+	});
+
+	it('does not erase another tab\'s new sign-in when its own renewal is refused', async () => {
+		user.token = token({ exp: now() - 10 });
+		localStorage.setItem('thzero.auth', JSON.stringify({ token: user.token, user: { id: 'u' }, renewal: 'key1' }));
+		providers.renew = vi.fn(async () => ({ success: false }));
+		// The other tab saves only after this one has stopped waiting for it.
+		const renew = service._renewOnce.bind(service);
+		service._renewOnce = async (correlationId) => {
+			const answer = await renew(correlationId);
+			localStorage.setItem('thzero.auth', JSON.stringify({ token: renewed, user: { id: 'u' }, renewal: 'key9' }));
+			return answer;
+		};
+		await service._renewOrSignOut('c');
+		expect(user.resetUser).not.toHaveBeenCalled();
+		expect(user.token).toBe(renewed);
+		expect(saved().renewal).toBe('key9');
 	});
 
 	it('renews once when asked twice at the same time', async () => {
