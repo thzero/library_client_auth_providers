@@ -147,6 +147,61 @@ describe('ServerTokenAuthService renewal', () => {
 		expect(providers.renew).toHaveBeenCalledTimes(2);
 	});
 
+	it('keeps an expired sign-in and its key when the server is out of reach, and renews once it answers', async () => {
+		vi.useFakeTimers();
+		providers.renew = vi.fn(async () => ({ success: false, unreachable: true }));
+		const expired = token({ userId: 'u', exp: now() - 10 });
+		localStorage.setItem('thzero.auth', JSON.stringify({ token: expired, user: { id: 'u' }, renewal: 'key1' }));
+		await service.initialize('c');
+		expect(user.token).toBe(expired);
+		expect(saved().renewal).toBe('key1');
+		expect(user.resetUser).not.toHaveBeenCalled();
+
+		await service.refreshToken('c');
+		expect(user.resetUser).not.toHaveBeenCalled();
+
+		providers.renew = vi.fn(async () => ({ success: true, results: { token: renewed, user: { id: 'u' }, renewal: 'key2' } }));
+		await vi.advanceTimersByTimeAsync(60 * 1000);
+		expect(user.token).toBe(renewed);
+		expect(saved().renewal).toBe('key2');
+	});
+
+	it('keeps the sign-in when the timer finds the token expired and the server out of reach', async () => {
+		vi.useFakeTimers();
+		providers.renew = vi.fn(async () => ({ success: false, unreachable: true }));
+		await service.signedIn('c', token({ userId: 'u', exp: now() + 1 }), { id: 'u' }, 'key1');
+		await vi.advanceTimersByTimeAsync(2000);
+		expect(providers.renew).toHaveBeenCalled();
+		expect(user.resetUser).not.toHaveBeenCalled();
+		expect(saved().renewal).toBe('key1');
+	});
+
+	it('renews when the page wakes up or comes back online with the token due', async () => {
+		const listeners = {};
+		globalThis.window.addEventListener = (type, listener) => (listeners[type] = listener);
+		globalThis.document = { visibilityState: 'visible', addEventListener: (type, listener) => (listeners[type] = listener) };
+		try {
+			await service.initialize('c');
+			await service.signedIn('c', token({ userId: 'u', exp: now() + 3600 }), { id: 'u' }, 'key1');
+			await listeners.visibilitychange();
+			expect(providers.renew).not.toHaveBeenCalled();
+
+			user.token = token({ userId: 'u', exp: now() - 10 });
+			localStorage.setItem('thzero.auth', JSON.stringify({ token: user.token, user: { id: 'u' }, renewal: 'key1' }));
+			await listeners.visibilitychange();
+			expect(providers.renew).toHaveBeenCalledTimes(1);
+			expect(user.token).toBe(renewed);
+
+			user.token = token({ userId: 'u', exp: now() + 60 });
+			localStorage.setItem('thzero.auth', JSON.stringify({ token: user.token, user: { id: 'u' }, renewal: 'key2' }));
+			await listeners.online();
+			expect(providers.renew).toHaveBeenCalledTimes(2);
+		}
+		finally {
+			delete globalThis.document;
+		}
+	});
+
 	it('takes the sign-in another tab already renewed, without renewing again', async () => {
 		await service.signedIn('c', token({ userId: 'u', exp: now() + 60 }), { id: 'u' }, 'key1');
 		localStorage.setItem('thzero.auth', JSON.stringify({ token: renewed, user: { id: 'u' }, renewal: 'key2' }));
@@ -195,7 +250,7 @@ describe('ServerTokenAuthService renewal', () => {
 
 	it('follows a sign-in and a sign-out in another tab', async () => {
 		const listeners = [];
-		globalThis.window.addEventListener = (type, listener) => listeners.push(listener);
+		globalThis.window.addEventListener = (type, listener) => ((type === 'storage') ? listeners.push(listener) : null);
 		await service.initialize('c');
 
 		localStorage.setItem('thzero.auth', JSON.stringify({ token: renewed, user: { id: 'u' }, renewal: 'key2' }));

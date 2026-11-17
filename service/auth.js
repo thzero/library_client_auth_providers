@@ -20,6 +20,8 @@ const RETRY_MS = 60 * 1000;
 // the player stays signed in until the key goes unused for its lifetime (the auth server's, 30 days
 // by default). Each key works once; tabs share the newest through localStorage, so one tab's
 // renewal reaches the others. Signing out deletes the key on the server.
+// A renewal the server didn't answer (out of reach, or failing) keeps the sign-in and the key and
+// tries again every minute; only a refused key signs the player out.
 // Without a renewal key (an auth server that doesn't issue them), the sign-in lasts until the JWT
 // expires.
 // Inject it as the app's auth service. Call initialize() once the store exists, to pick up a
@@ -173,13 +175,35 @@ class ServerTokenAuthService extends BaseAuthService {
 			return true;
 		}
 
-		// The token still works: keep the sign-in while it lasts. Try again in a minute when the
-		// server couldn't be reached; when it refused the key, the sign-in ends with the token.
+		// The server couldn't be reached, or failed: it never said the key was bad, so keep the
+		// sign-in and the key, even when the token has run out (a computer waking up before its
+		// network, the server restarting), and try again in a minute. Only a refused key ends it.
+		if (response?.unreachable) {
+			if (!this.token && saved.token)
+				await this._apply(correlationId, saved.token, saved.user);
+			this._scheduleIn(RETRY_MS);
+			return true;
+		}
+
+		// Refused, but the token still works: keep the sign-in while it lasts.
 		if (this.token && !this._expired(this.token)) {
-			this._scheduleIn(response?.unreachable ? RETRY_MS : Math.max(0, this._expiresAt(this.token) - Date.now()));
+			this._scheduleIn(Math.max(0, this._expiresAt(this.token) - Date.now()));
 			return true;
 		}
 		return false;
+	}
+
+	// Renews now when the token is close to expiring, as when the page comes back from sleep or the
+	// network returns (a timer can fire late or not at all while the computer sleeps).
+	async _renewIfDue() {
+		if (!this.token || !this._load()?.renewal || !this._nearExpiry(this.token))
+			return;
+		await this._renewOrSignOut(LibraryCommonUtility.correlationId());
+	}
+
+	async _renewOrSignOut(correlationId) {
+		if (!await this._renew(correlationId) && this.token && this._expired(this.token))
+			await this._signOutHere(correlationId);
 	}
 
 	_nearExpiry(token) {
@@ -213,9 +237,7 @@ class ServerTokenAuthService extends BaseAuthService {
 			return;
 		this._timer = setTimeout(async () => {
 			this._timer = null;
-			const correlationId = LibraryCommonUtility.correlationId();
-			if (!await this._renew(correlationId) && this.token && this._expired(this.token))
-				await this._signOutHere(correlationId);
+			await this._renewOrSignOut(LibraryCommonUtility.correlationId());
 		}, ms);
 	}
 
@@ -249,7 +271,7 @@ class ServerTokenAuthService extends BaseAuthService {
 	}
 
 	// Follows the other tabs: a sign-in or renewal there is taken here, and a sign-out there signs
-	// this tab out too.
+	// this tab out too. Also renews when the page wakes up or the network comes back.
 	_watch() {
 		if (this._watching || (typeof window === 'undefined') || !window.addEventListener)
 			return;
@@ -272,6 +294,11 @@ class ServerTokenAuthService extends BaseAuthService {
 				await this._serviceUser.setAuthCompleted(correlationId, true);
 			}
 		});
+		// Back from sleep, or back online: renew when it's due.
+		window.addEventListener('online', () => this._renewIfDue());
+		if ((typeof document !== 'undefined') && document.addEventListener) {
+			document.addEventListener('visibilitychange', () => ((document.visibilityState === 'visible') ? this._renewIfDue() : null));
+		}
 	}
 }
 
