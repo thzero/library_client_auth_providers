@@ -10,6 +10,10 @@ import Constants from '../constants';
 // renewal couldn't reach the server.
 const RENEW_BEFORE_MS = 5 * 60 * 1000;
 const RETRY_MS = 60 * 1000;
+// How long a tab whose key was refused waits for another tab that used the key first to save the
+// new one, before it gives up on the sign-in.
+const RACE_WAIT_MS = 3000;
+const RACE_STEP_MS = 250;
 
 // The browser's session with the app's own auth server. A sign-in (AuthProvidersService: Google,
 // Steam, Discord) proves the player to the auth server, which answers with its own short-lived JWT,
@@ -19,7 +23,9 @@ const RETRY_MS = 60 * 1000;
 // traded for a new JWT and key (AuthProvidersService.renew, injected as SERVICE_AUTH_PROVIDERS), so
 // the player stays signed in until the key goes unused for its lifetime (the auth server's, 30 days
 // by default). Each key works once; tabs share the newest through localStorage, so one tab's
-// renewal reaches the others. Signing out deletes the key on the server.
+// renewal reaches the others. Tabs renew one at a time (a Web Lock), and a tab that still loses
+// the race (its key refused because another tab just used it) takes the other tab's new sign-in
+// rather than signing out, which would erase it for every tab. Signing out deletes the key on the server.
 // A renewal the server didn't answer (out of reach, or failing) keeps the sign-in and the key and
 // tries again every minute; only a refused key signs the player out.
 // Without a renewal key (an auth server that doesn't issue them), the sign-in lasts until the JWT
@@ -35,6 +41,7 @@ class ServerTokenAuthService extends BaseAuthService {
 		this._renewing = null;
 		this._timer = null;
 		this._watching = false;
+		this._raceWaitMs = RACE_WAIT_MS;
 	}
 
 	async init(injector) {
@@ -56,6 +63,8 @@ class ServerTokenAuthService extends BaseAuthService {
 		}
 		if (saved?.renewal && await this._renew(correlationId))
 			return;
+		if (await this._takeNewer(correlationId))
+			return;
 
 		this._save(null);
 		await this._serviceUser.setAuthCompleted(correlationId, true);
@@ -71,6 +80,8 @@ class ServerTokenAuthService extends BaseAuthService {
 		if (!this.token || !this._expired(this.token))
 			return;
 		if (await this._renew(correlationId))
+			return;
+		if (await this._takeNewer(correlationId))
 			return;
 		await this._signOutHere(correlationId);
 	}
@@ -136,10 +147,14 @@ class ServerTokenAuthService extends BaseAuthService {
 	}
 
 	// Trades the saved renewal key for a new token and key. Answers whether the player is signed in
-	// afterwards. One renewal at a time; a tab that finds another tab already renewed takes that.
+	// afterwards. One renewal at a time, across tabs too (a Web Lock, where the browser has them);
+	// a tab that finds another tab already renewed takes that.
 	_renew(correlationId) {
 		if (!this._renewing) {
-			this._renewing = this._renewOnce(correlationId).finally(() => {
+			const locks = (typeof navigator !== 'undefined') ? navigator.locks : null;
+			const renew = () => this._renewOnce(correlationId);
+			const work = locks?.request ? locks.request(`${this._storageKey()}.renew`, renew) : renew();
+			this._renewing = work.finally(() => {
 				this._renewing = null;
 			});
 		}
@@ -167,14 +182,6 @@ class ServerTokenAuthService extends BaseAuthService {
 			return true;
 		}
 
-		// Another tab may have used the key first, and saved the new one.
-		const latest = this._load();
-		if (latest?.renewal && (latest.renewal !== saved.renewal) && latest.token && !this._expired(latest.token)) {
-			await this._apply(correlationId, latest.token, latest.user);
-			this._schedule(latest.token);
-			return true;
-		}
-
 		// The server couldn't be reached, or failed: it never said the key was bad, so keep the
 		// sign-in and the key, even when the token has run out (a computer waking up before its
 		// network, the server restarting), and try again in a minute. Only a refused key ends it.
@@ -184,6 +191,10 @@ class ServerTokenAuthService extends BaseAuthService {
 			this._scheduleIn(RETRY_MS);
 			return true;
 		}
+
+		// Refused: another tab may have used the key first, and be about to save the new one.
+		if (await this._waitForNewer(correlationId))
+			return true;
 
 		// Refused, but the token still works: keep the sign-in while it lasts.
 		if (this.token && !this._expired(this.token)) {
@@ -202,8 +213,34 @@ class ServerTokenAuthService extends BaseAuthService {
 	}
 
 	async _renewOrSignOut(correlationId) {
-		if (!await this._renew(correlationId) && this.token && this._expired(this.token))
-			await this._signOutHere(correlationId);
+		if (await this._renew(correlationId) || !this.token || !this._expired(this.token))
+			return;
+		if (await this._takeNewer(correlationId))
+			return;
+		await this._signOutHere(correlationId);
+	}
+
+	// Takes the sign-in another tab saved: a token other than this tab's that still works. Answers
+	// whether it did.
+	async _takeNewer(correlationId) {
+		const saved = this._load();
+		if (!saved?.token || (saved.token === this.token) || this._expired(saved.token))
+			return false;
+		await this._apply(correlationId, saved.token, saved.user);
+		this._schedule(saved.token);
+		return true;
+	}
+
+	// Waits a few seconds for another tab's sign-in (_takeNewer). Answers whether one came.
+	async _waitForNewer(correlationId) {
+		const until = Date.now() + this._raceWaitMs;
+		for (;;) {
+			if (await this._takeNewer(correlationId))
+				return true;
+			if (Date.now() >= until)
+				return false;
+			await new Promise((resolve) => setTimeout(resolve, RACE_STEP_MS));
+		}
 	}
 
 	_nearExpiry(token) {
