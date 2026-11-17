@@ -182,6 +182,10 @@ describe('The auth server', () => {
 		answer = { status: 401, body: { success: false, message: 'no' } };
 		globalThis.fetch = vi.fn(async () => ({ ok: false, status: 401, json: async () => answer.body }));
 		expect((await service.renew('c', 'key')).unreachable).toBeUndefined();
+		globalThis.fetch = vi.fn(async () => ({ ok: false, status: 502, json: async () => { throw new Error('not json'); } }));
+		expect((await service.renew('c', 'key')).unreachable).toBe(true);
+		globalThis.fetch = vi.fn(async () => ({ ok: false, status: 500, json: async () => ({ success: false, message: 'db' }) }));
+		expect((await service.renew('c', 'key')).unreachable).toBe(true);
 	});
 
 	it('refuses a missing proof without asking the server', async () => {

@@ -150,8 +150,8 @@ class AuthProvidersService extends Service {
 
 	// The backend config entry for the auth server.
 	// Trades a renewal key for a new sign-in: { token, user, renewal, renewalExpiresAt }. The
-	// answer is marked unreachable when the auth server couldn't be reached (ServerTokenAuthService
-	// tries again then).
+	// answer is marked unreachable when the auth server couldn't be reached or failed rather than
+	// refused (ServerTokenAuthService keeps the key and tries again then).
 	async renew(correlationId, renewal) {
 		return await this._post(correlationId, 'renew', this._paths().renew, { renewal });
 	}
@@ -235,7 +235,12 @@ class AuthProvidersService extends Service {
 		const answer = await response.json().catch(() => null);
 		if (!response.ok || !answer?.success) {
 			const reason = answer?.message ?? (response.status === 401 ? 'The sign-in server refused the request (check the API key, or sign in again).' : `The sign-in server answered ${response.status}.`);
-			return this._error('AuthProvidersService', method, reason, null, null, null, correlationId);
+			const failed = this._error('AuthProvidersService', method, reason, null, null, null, correlationId);
+			// Only a 401 or 403 is the server refusing; anything else (a 5xx while it restarts, a
+			// proxy's 502) is it failing, and worth trying again like one out of reach.
+			if (!response.ok && (response.status !== 401) && (response.status !== 403))
+				failed.unreachable = true;
+			return failed;
 		}
 		return this._successResponse(answer.results, correlationId);
 	}
