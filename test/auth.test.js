@@ -69,6 +69,13 @@ describe('ServerTokenAuthService', () => {
 		expect(LibraryClientUtility.$navRouter.push).toHaveBeenCalledWith('/');
 	});
 
+	it('announces signing in and out on the auth event', async () => {
+		await service.signedIn('c', token({ exp: now() + 3600 }), { id: 'u' });
+		expect(service._serviceEvent.emit).toHaveBeenCalledWith('auth', true);
+		await service.signOut('c');
+		expect(service._serviceEvent.emit).toHaveBeenLastCalledWith('auth', false);
+	});
+
 	it('signs out once the token has expired', async () => {
 		user.token = token({ exp: now() - 10 });
 		await service.refreshToken('c', null, true);
