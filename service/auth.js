@@ -114,6 +114,7 @@ class ServerTokenAuthService extends BaseAuthService {
 		await this._serviceUser.setLoggedIn(correlationId, true);
 		await this._serviceUser.setAuthCompleted(correlationId, true);
 		await this.announceToken(correlationId, user, token);
+		this._serviceEvent.emit(LibraryClientConstants.EventKeys.Auth.Auth, true);
 	}
 
 	// The token's exp in milliseconds, read without checking the signature (the auth server checks
@@ -292,6 +293,7 @@ class ServerTokenAuthService extends BaseAuthService {
 		this._save(null);
 		await this._serviceUser.resetUser(correlationId);
 		await this._serviceUser.setAuthCompleted(correlationId, true);
+		this._serviceEvent.emit(LibraryClientConstants.EventKeys.Auth.Auth, false);
 		LibraryClientUtility.$navRouter.push('/');
 	}
 
